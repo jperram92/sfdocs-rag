@@ -1,0 +1,98 @@
+# sfdocs configuration. Every value can be left as-is to start.
+# Paths are relative to this file unless absolute.
+
+data_dir: ./data
+
+# ---------- LM Studio (or any OpenAI-compatible local server) ----------
+llm:
+  base_url: http://localhost:1234/v1      # LM Studio "Developer" tab -> Start Server
+  api_key: lm-studio                       # LM Studio ignores this, but the client needs a value
+  chat_model: qwen2.5-7b-instruct          # whatever `curl localhost:1234/v1/models` lists
+  embed_model: text-embedding-nomic-embed-text-v1.5
+  # nomic-embed needs task prefixes; set both to "" for models that don't (bge, gte, etc.)
+  embed_query_prefix: "search_query: "
+  embed_doc_prefix: "search_document: "
+  embed_batch_size: 64
+  max_embed_chars: 6000                    # truncate chunks before embedding (model context guard)
+  timeout_s: 300
+
+# ---------- What to crawl ----------
+# type: sitemap   -> one or more sitemap / sitemap-index URLs (followed recursively)
+# type: robots    -> read Sitemap: lines from each host's robots.txt, then as sitemap
+# type: pdf_index -> Salesforce's docs index JSON; every pdf_url found is downloaded
+# include/exclude are regexes matched against each URL.
+sources:
+  # Classic developer guides page by page (~15,700 pages). Off by default: the same 32 guides come
+  # complete as PDFs from resources.docs.salesforce.com (pdf-guides), which is 32 requests instead of
+  # ~15,700 to developer.salesforce.com's rate-limited host.
+  - name: dev-atlas            # classic developer guides (Apex, APIs, Metadata, SOQL, ...)
+    type: sitemap
+    enabled: false
+    urls:
+      - https://developer.salesforce.com/docs-atlas-sitemap.xml
+    include: ['/docs/atlas\.en-us\.(?!\d)']   # English, latest version only (skip atlas.en-us.248.0...)
+    exclude: []
+
+  - name: dev-docs             # newer docs site (LWC, Agentforce, Data Cloud, Commerce, MC, ...)
+    type: sitemap
+    enabled: true
+    urls:
+      - https://developer.salesforce.com/docs/ssg-sitemap.xml
+    include: ['developer\.salesforce\.com/docs/']
+    exclude: ['/ja-jp/', '/fr-fr/', '/de-de/', '/es-es/', '/it-it/', '/ko-kr/', '/zh-cn/', '/zh-tw/', '/pt-br/', '/nl-nl/']
+
+  - name: pdf-guides           # every downloadable PDF guide listed in the docs index
+    type: pdf_index
+    enabled: true
+    urls:
+      - https://developer.salesforce.com/docs/get_index/en-us/000.0/false/All%20Services/all
+    # Skip a PDF when its guide was already crawled as HTML from dev-atlas (avoids duplicate chunks).
+    # Only matters if you enable dev-atlas.
+    skip_if_atlas_present: true
+
+  - name: help                 # help.salesforce.com articles (admin/setup docs). JS-heavy -> needs Playwright.
+    type: robots
+    enabled: false             # turn on once the dev docs are indexed; it is the biggest source
+    hosts:
+      - https://help.salesforce.com
+    include: ['language=en_US']
+    exclude: []
+    render: always             # always use the headless browser for this source
+
+# ---------- Crawler ----------
+crawl:
+  # developer.salesforce.com returns 403 for unrecognised agents; keep the python-httpx token.
+  user_agent: "sfdocs-rag/0.1 (personal documentation index) python-httpx"
+  concurrency: 2               # parallel requests (each host is still paced by per_host_delay_s)
+  per_host_delay_s: 2.5        # politeness delay per host; developer.salesforce.com 403s bursts
+  max_block_minutes: 120       # back off on 403/429 for up to this long, then defer the rest to the next run
+  retries: 4
+  timeout_s: 60
+  max_docs: 0                  # 0 = no limit (use e.g. 200 for a trial run)
+  refresh_after_days: 14       # re-check pages older than this on the next run (conditional GET)
+
+render:
+  enabled: true                # Playwright fallback for pages whose HTML has no real content
+  min_text_chars: 300          # below this, a page is treated as a JS shell and rendered
+  concurrency: 1
+  timeout_s: 90
+  executable_path: null         # null = Playwright's Chromium; or a path to Chrome/Chromium (env SFDOCS_CHROMIUM_PATH)
+  launch_args: []
+
+# ---------- Chunking ----------
+chunk:
+  max_chars: 4000              # ~1000 tokens
+  overlap_chars: 400
+
+# ---------- Condensing (local LLM) ----------
+condense:
+  doc_summary: true            # 3-6 sentence summary per page/guide, indexed as its own searchable chunk
+  chunk_context: false         # "contextual retrieval": 1-2 sentence context prepended to every chunk
+                               # before embedding. Better recall, but one LLM call per chunk (slow).
+  max_input_chars: 24000       # how much of a document the summariser sees
+  concurrency: 2               # parallel LLM calls (match LM Studio's parallel slots)
+
+# ---------- Retrieval ----------
+search:
+  default_k: 8
+  candidates: 40               # per retriever (vector and keyword) before fusion

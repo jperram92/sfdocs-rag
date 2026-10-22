@@ -1,0 +1,41 @@
+services:
+  # Offline test suite: mock Salesforce site + fake LM Studio + real headless Chromium.
+  test:
+    build: .
+    image: sfdocs
+    command: ["python3", "-m", "pytest", "-v"]
+
+  # Same suite plus the live tests against developer.salesforce.com
+  # (and a real index/search if LM Studio is running on the host).
+  live-test:
+    image: sfdocs
+    build: .
+    command: ["python3", "-m", "pytest", "-v", "--live"]
+    environment:
+      LMSTUDIO_BASE_URL: http://host.docker.internal:1234/v1
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  # The real batch job. Index lands in ./data on the host, so the MCP server
+  # (run natively or via the `mcp` service) can use it.
+  pipeline:
+    image: sfdocs
+    build: .
+    command: ["sfdocs", "--config", "/app/config.yaml", "run-all"]
+    environment:
+      SFDOCS_DATA_DIR: /data
+      LMSTUDIO_BASE_URL: http://host.docker.internal:1234/v1
+    volumes: ["./data:/data"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  # MCP server over stdio, for: claude mcp add salesforce-docs -- docker compose -f /abs/path/docker-compose.yml run --rm -T mcp
+  mcp:
+    image: sfdocs
+    build: .
+    command: ["sfdocs-mcp"]
+    stdin_open: true
+    environment:
+      SFDOCS_DATA_DIR: /data
+      SFDOCS_CONFIG: /app/config.yaml
+      LMSTUDIO_BASE_URL: http://host.docker.internal:1234/v1
+    volumes: ["./data:/data"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
